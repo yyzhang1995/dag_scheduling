@@ -72,6 +72,12 @@ class Graph:
             raise TypeError("Not a DAG")
         return topo
 
+    def degree_out_vertices(self):
+        degree = []
+        for i in range(self._num_vertex):
+            degree.append(len(self._edges[i]))
+        return degree
+
 
 def test():
     num_vertex = 7

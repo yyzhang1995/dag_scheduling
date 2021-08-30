@@ -6,12 +6,12 @@ from graph_model.utils import get_rest_working_time
 from tqdm import tqdm
 
 
-def load_dag(filename):
+def load_dag(filename, batch_start):
     """
     读取DAG图
     :return:
     """
-    G, time_cost, dig_to_table_name, list_batch_start = building_graph(filename)
+    G, time_cost, dig_to_table_name, list_batch_start = building_graph(filename, batch_start)
     return G, time_cost, dig_to_table_name, list_batch_start
 
 
@@ -178,9 +178,16 @@ def main_loop(params):
     T = params['T']
     m = params['m']
     E = params['E']  # out_edges of DAG
+
+    list_batch = params['batch_list']
+    available_list = list_batch.pop(0)['table_list']  # 记录不受起批时间限制的表
+    mask_available_time_init = np.zeros(T)
+    mask_available_time_init[available_list] = 1  # 基于时间的mask, 重要
+
     E_trans = transpose_G(E)
     in_degs = np.asarray(get_in_deg(E))
-    init_pool = np.where(in_degs == 0)[0].tolist()
+    init_pool = np.where((in_degs == 0) * mask_available_time_init)[0].tolist()
+    print("init available list ", len(init_pool))
 
     sigma = params['sigma']
     alpha = params['alpha']
@@ -190,9 +197,9 @@ def main_loop(params):
     time_cost = params['cost']
     rest_working_time = get_rest_working_time(E, time_cost)
     rest_working_time = torch.tensor(rest_working_time).float()
-    init_pool = sorted(init_pool, key=lambda x:rest_working_time[x], reverse=True)
+    init_pool = sorted(init_pool, key=lambda x:rest_working_time[x], reverse=True)  # 对初始任务根据rest_working_hour进行排序
 
-    hormones = 0.1 * np.ones((T, m))  # hormones is of shape [T, m]
+    hormones = 1e-6 * np.ones((T, m))  # hormones is of shape [T, m]
 
     best_task_distribution_this_round = None
     best_time = float('inf')
@@ -200,41 +207,41 @@ def main_loop(params):
 
     for r in range(Nc):
         print(f"round {r}")
-        # delta_hormones = np.zeros_like(hormones)
         total_time_ants = []
 
         for _ in tqdm(range(Nant)):
-            # print(f"ant {ant}")
             # 初始化
-
-            task_queue = init_pool[:]
+            task_queue = init_pool[:]  # task_queue 确保是可以安排的任务
             in_degs_copy = in_degs.copy()
 
-            if len(task_queue) < m:
-                total_distributed = 0
-                distributed_time_for_each_server = np.zeros(m)
+            total_distributed = 0  # 总的任务分配时间
+            batch_pointer = 0  # 包指针, 用于判断哪些批次可以开始运行
+            mask_available_time = mask_available_time_init.copy()
+            distributed_time_for_each_server = np.zeros(m)
 
-                last_finish_time_for_task = np.zeros(T)  # 任务的最晚完成时间
-                last_finish_time_for_server = np.zeros(m)  # 当前服务器上的最晚完成时间
-                server_distributed_for_task = -1 * np.ones(T).astype(np.uint8)  # 任务被分配于哪一台服务器
-                working_order = [[] for _ in range(m)]  # 服务器上任务的具体工作顺序
-            else:
-                total_distributed, distributed_time_for_each_server, last_finish_time_for_task, \
-                last_finish_time_for_server, server_distributed_for_task, \
-                task_chosen, working_order = init_ant(task_queue, m, T, time_cost)
-                for task in task_chosen:
-                    for out_vertex in E[task]:
-                        in_degs_copy[out_vertex] -= 1
-                        if in_degs_copy[out_vertex] == 0:
-                            renew_queue(task_queue, out_vertex, rest_working_time)
+            last_finish_time_for_task = np.zeros(T)  # 任务的最晚完成时间
+            last_finish_time_for_server = np.zeros(m)  # 当前服务器上的最晚完成时间
+            server_distributed_for_task = -1 * np.ones(T).astype(np.uint8)  # 任务被分配于哪一台服务器
+            working_order = [[] for _ in range(m)]  # 服务器上任务的具体工作顺序
 
-            while task_queue:
+            while task_queue or batch_pointer < len(list_batch):
+                while not task_queue:
+                    # 表明此时起批时间卡住了进程
+                    current_time = list_batch[batch_pointer]['start']
+                    while batch_pointer < len(list_batch) and list_batch[batch_pointer]['start'] <= current_time:
+                        mask_available_time[list_batch[batch_pointer]['table_list']] = 1
+                        for ava_task in list_batch[batch_pointer]['table_list']:
+                            if in_degs_copy[ava_task] == 0:
+                                renew_queue(task_queue, ava_task, rest_working_time)
+                        batch_pointer += 1
+                    last_finish_time_for_server = current_time * np.ones(m)
+
                 # 从任务池当中随机抽取一个任务, 并扫描是否有新任务可以加入任务池
                 task_chosen = choose_task_in_queue(task_queue, rest_working_time)
                 task = task_queue.pop(task_chosen)
                 for out_vertex in E[task]:
                     in_degs_copy[out_vertex] -= 1
-                    if in_degs_copy[out_vertex] == 0:
+                    if in_degs_copy[out_vertex] == 0 and mask_available_time[out_vertex] == 1:
                         renew_queue(task_queue, out_vertex, rest_working_time)
 
                 # 判断任务task可以被分配于哪些机器上
@@ -260,18 +267,24 @@ def main_loop(params):
                 server_distributed_for_task[task] = server_distributed
                 working_order[server_distributed].append(task)
 
+                current_time = np.min(last_finish_time_for_server)
+                while batch_pointer < len(list_batch) and list_batch[batch_pointer]['start'] <= current_time:
+                    mask_available_time[list_batch[batch_pointer]['table_list']] = 1
+                    for ava_task in list_batch[batch_pointer]['table_list']:
+                        if in_degs_copy[ava_task] == 0:
+                            renew_queue(task_queue, ava_task, rest_working_time)
+                    batch_pointer += 1
+
+            # 一只蚂蚁的安排结束
             # 确定该蚂蚁完成任务的总时间，并更新delta_hormones
-            # print(server_distributed_for_task)
-            # print(last_finish_time_for_task)
             total_time = np.max(last_finish_time_for_server)
             total_time_ants.append(total_time)
-            # for i in range(T):
-            #     delta_hormones[i, server_distributed_for_task[i]] += kappa / total_time
-            # print(delta_hormones)
+
             if total_time < best_time:
                 best_time = total_time
                 best_task_distribution_this_round = server_distributed_for_task
                 best_working_order = working_order
+                print(sum([len(o) for o in best_working_order]))
 
         # renew hormones
         hormones = hormones * (1 - rho)
@@ -343,7 +356,8 @@ if __name__ == '__main__':
     # test()
 
     filename = '../dataset/cloud20210710_eng.csv'
-    G, time_cost, dig_to_table_name, list_batch_start = load_dag(filename)
+    batch_start = '../dataset/batch_start_time.csv'
+    G, time_cost, dig_to_table_name, list_batch_start = load_dag(filename, batch_start)
     print(sum(time_cost))
 
     # const
@@ -352,7 +366,7 @@ if __name__ == '__main__':
     params = {
         'T': G.get_num_vertex(),
         'm': m,
-        'Nc': 2,
+        'Nc': 8,
         'Nant': 50,
         'E': G.get_edges(),
         'cost': time_cost,
