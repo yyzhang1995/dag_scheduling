@@ -1,4 +1,4 @@
-# DAG任务调度（包括数据处理代码）
+# DAG任务调度代码说明
 
 ## graph_model
 
@@ -14,8 +14,32 @@ utils.py定义了一些工具函数，包括一些针对Graph类的函数
 
 ## AOC
 
-蚁群算法的初步实现（未完成）
+蚁群算法的基础实现（未考虑起批时间）：aoc_dag.py
 
+蚁群算法考虑起批时间（纯numpy实现，速度更快）：aoc_dag_with_bs_np.py
 
+并行蚁群算法（目前结果有些问题，可能需要调试）：aoc_dag_with_bs_multi_process.py
 
-另外由于我没有在新环境里配置项目，暂不提供requirement文档。所需要的三个重要的模块是numpy（1.19.5）, pytorch（1.7.1）以及pandas（1.1.5）
+## tools
+
+主要是一些工具函数
+
+可视化代码（各进程的任务以不同颜色的线段进行展示）：vision.py
+
+计算量化指标：get_scores.py
+
+将输出转换为.csv格式：change_form.py
+
+# 运行环境
+
+python3.7
+
+## 安装
+
+git clone https://github.com/yyzhang1995/dag_scheduling
+
+或者下载.zip并解压
+
+## 配置环境
+
+pip install -r requirements.txt
